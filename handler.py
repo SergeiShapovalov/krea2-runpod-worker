@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib.metadata
 import io
 import json
 import os
 import random
 import shutil
+import sys
 import time
+import traceback
 import uuid
 from pathlib import Path
 from urllib.parse import unquote, urlencode, urlparse
@@ -350,8 +353,62 @@ def list_output_files(since: float) -> list[dict]:
     return sorted(files, key=lambda item: item.get("mtime", 0))[-50:]
 
 
+def runtime_diagnostics() -> dict:
+    diagnostics = {
+        "python": sys.version,
+        "executable": sys.executable,
+    }
+
+    try:
+        import torch
+
+        diagnostics["torch"] = {
+            "version": torch.__version__,
+            "cuda_version": torch.version.cuda,
+            "cuda_available": torch.cuda.is_available(),
+            "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        }
+    except Exception:
+        diagnostics["torch_error"] = traceback.format_exc(limit=8)
+
+    try:
+        diagnostics["comfy_kitchen_distribution"] = importlib.metadata.version("comfy-kitchen")
+        import comfy_kitchen
+
+        diagnostics["comfy_kitchen_file"] = getattr(comfy_kitchen, "__file__", None)
+        diagnostics["comfy_kitchen_version_attr"] = getattr(comfy_kitchen, "__version__", None)
+        diagnostics["comfy_kitchen_backends"] = comfy_kitchen.list_backends()
+    except Exception:
+        diagnostics["comfy_kitchen_error"] = traceback.format_exc(limit=12)
+
+    try:
+        from comfy_kitchen.tensor import TensorCoreFP8Layout, get_layout_class
+
+        diagnostics["comfy_kitchen_tensor"] = {
+            "TensorCoreFP8Layout": str(TensorCoreFP8Layout),
+            "get_layout_class_fp8": str(get_layout_class("TensorCoreFP8Layout")),
+        }
+    except Exception:
+        diagnostics["comfy_kitchen_tensor_error"] = traceback.format_exc(limit=12)
+
+    try:
+        import comfy.quant_ops as quant_ops
+
+        diagnostics["comfy_quant_ops"] = {
+            "file": getattr(quant_ops, "__file__", None),
+            "_CK_AVAILABLE": getattr(quant_ops, "_CK_AVAILABLE", None),
+            "_CK_MXFP8_AVAILABLE": getattr(quant_ops, "_CK_MXFP8_AVAILABLE", None),
+            "get_layout_class_fp8": str(quant_ops.get_layout_class("TensorCoreFP8Layout")),
+        }
+    except Exception:
+        diagnostics["comfy_quant_ops_error"] = traceback.format_exc(limit=12)
+
+    return diagnostics
+
+
 def normalize_input(job_input: dict) -> dict:
     params = {
+        "diagnostics_only": bool(job_input.get("diagnostics_only", False)),
         "prompt": str(job_input.get("prompt") or "").strip(),
         "negative_prompt": str(job_input.get("negative_prompt") or ""),
         "width": int(job_input.get("width", 1080)),
@@ -373,6 +430,8 @@ def normalize_input(job_input: dict) -> dict:
         "debug": bool(job_input.get("debug", False)),
         "timeout": int(job_input.get("timeout", 900)),
     }
+    if params["diagnostics_only"]:
+        return params
     if not params["prompt"]:
         raise RuntimeError("prompt is required.")
     if params["sampler"] not in SAMPLERS:
@@ -393,6 +452,11 @@ def handler(job: dict) -> dict:
     try:
         wait_for_comfy()
         params = normalize_input(job.get("input") or {})
+        if params["diagnostics_only"]:
+            return {
+                "diagnostics": runtime_diagnostics(),
+                "seconds": round(time.time() - started, 3),
+            }
         lora_name = ensure_lora(params["lora_source"], params["lora_filename"]) if params["use_lora"] else ""
 
         images = []

@@ -14,7 +14,7 @@ RUN cd /comfyui \
          [ -f "$r" ] && uv pip install -r "$r" || true; \
        done \
     && uv pip install "transformers>=4.50.3,<5" "huggingface-hub<1.0" "comfy-kitchen==0.2.13" \
-    && python -c "import comfy_kitchen" \
+    && python -c 'from comfy_kitchen.tensor import TensorCoreFP8Layout, get_layout_class; import comfy.quant_ops as quant_ops; assert TensorCoreFP8Layout is not None; assert quant_ops._CK_AVAILABLE is True; assert get_layout_class("TensorCoreFP8Layout") is not None' \
     && python /comfyui/main.py --quick-test-for-ci --cpu
 
 COPY prepare_models.py /prepare_models.py
