@@ -6,6 +6,15 @@ ENV PYTHONUNBUFFERED=1 \
     COMFY_LOG_LEVEL=INFO \
     COMFY_API_AVAILABLE_INTERVAL_MS=500
 
+RUN cd /comfyui \
+    && git pull --ff-only \
+    && uv pip install -r /comfyui/requirements.txt \
+    && for r in /comfyui/custom_nodes/*/requirements.txt; do \
+         [ -f "$r" ] && uv pip install -r "$r" || true; \
+       done \
+    && uv pip install "transformers>=4.50.3,<5" "huggingface-hub<1.0" \
+    && python /comfyui/main.py --quick-test-for-ci --cpu
+
 COPY prepare_models.py /prepare_models.py
 COPY handler.py /handler.py
 COPY krea_start.sh /krea_start.sh

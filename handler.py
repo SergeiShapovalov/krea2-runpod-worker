@@ -209,6 +209,19 @@ def queue_prompt(workflow: dict) -> str:
         json={"prompt": workflow, "client_id": str(uuid.uuid4())},
         timeout=30,
     )
+    if response.status_code >= 400:
+        details = response.text
+        try:
+            object_info = requests.get(f"{COMFY_URL}/object_info", timeout=10).json()
+            interesting = {
+                key: object_info.get(key)
+                for key in ["UNETLoader", "CLIPLoader", "VAELoader", "LoraLoader", "KSampler"]
+                if key in object_info
+            }
+            details += "\nobject_info=" + json.dumps(interesting, ensure_ascii=False)[:6000]
+        except Exception as info_error:
+            details += f"\nobject_info_error={info_error}"
+        raise RuntimeError(f"ComfyUI prompt error {response.status_code}: {details[:10000]}")
     response.raise_for_status()
     data = response.json()
     if data.get("error"):
