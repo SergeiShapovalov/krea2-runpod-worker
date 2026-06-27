@@ -20,6 +20,7 @@ from PIL import Image
 
 COMFY_URL = "http://127.0.0.1:8188"
 COMFY_MODELS = Path("/comfyui/models")
+COMFY_OUTPUT = Path("/comfyui/output")
 LORA_DIR = COMFY_MODELS / "loras"
 
 CUSTOM_MODEL_FILENAME = "redcraftKREA2RedMix_krea2Edition.safetensors"
@@ -241,6 +242,29 @@ def wait_for_history(prompt_id: str, timeout: int) -> dict:
     raise RuntimeError("Generation timed out.")
 
 
+def encode_image(image: Image.Image, filename: str) -> dict:
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return {
+        "filename": filename,
+        "type": "base64",
+        "data": base64.b64encode(buffer.getvalue()).decode("utf-8"),
+        "width": image.width,
+        "height": image.height,
+    }
+
+
+def normalize_image(image: Image.Image, requested_width: int, requested_height: int) -> Image.Image:
+    image = image.convert("RGB")
+    if image.size != (requested_width, requested_height):
+        left = max(0, (image.width - requested_width) // 2)
+        top = max(0, (image.height - requested_height) // 2)
+        image = image.crop((left, top, min(left + requested_width, image.width), min(top + requested_height, image.height)))
+        if image.size != (requested_width, requested_height):
+            image = image.resize((requested_width, requested_height), Image.Resampling.LANCZOS)
+    return image
+
+
 def fetch_images(history: dict, requested_width: int, requested_height: int) -> list[dict]:
     images = []
     for output in history.get("outputs", {}).values():
@@ -250,24 +274,26 @@ def fetch_images(history: dict, requested_width: int, requested_height: int) -> 
                 timeout=60,
             )
             response.raise_for_status()
-            image = Image.open(io.BytesIO(response.content)).convert("RGB")
-            if image.size != (requested_width, requested_height):
-                left = max(0, (image.width - requested_width) // 2)
-                top = max(0, (image.height - requested_height) // 2)
-                image = image.crop((left, top, min(left + requested_width, image.width), min(top + requested_height, image.height)))
-                if image.size != (requested_width, requested_height):
-                    image = image.resize((requested_width, requested_height), Image.Resampling.LANCZOS)
-            buffer = io.BytesIO()
-            image.save(buffer, format="PNG")
-            images.append(
-                {
-                    "filename": item["filename"],
-                    "type": "base64",
-                    "data": base64.b64encode(buffer.getvalue()).decode("utf-8"),
-                    "width": image.width,
-                    "height": image.height,
-                }
-            )
+            image = normalize_image(Image.open(io.BytesIO(response.content)), requested_width, requested_height)
+            images.append(encode_image(image, item["filename"]))
+    return images
+
+
+def fetch_saved_images(since: float, requested_width: int, requested_height: int) -> list[dict]:
+    if not COMFY_OUTPUT.exists():
+        return []
+    candidates = sorted(
+        [
+            p
+            for p in COMFY_OUTPUT.rglob("krea2_runpod*.png")
+            if p.is_file() and p.stat().st_mtime >= since - 2
+        ],
+        key=lambda p: p.stat().st_mtime,
+    )
+    images = []
+    for path in candidates:
+        image = normalize_image(Image.open(path), requested_width, requested_height)
+        images.append(encode_image(image, path.name))
     return images
 
 
@@ -322,9 +348,13 @@ def handler(job: dict) -> dict:
             params["seed"] = base_seed + index
             seeds.append(params["seed"])
             workflow = build_workflow(params, lora_name=lora_name)
+            generation_started = time.time()
             prompt_id = queue_prompt(workflow)
             history = wait_for_history(prompt_id, timeout=params["timeout"])
-            images.extend(fetch_images(history, params["width"], params["height"]))
+            fetched = fetch_images(history, params["width"], params["height"])
+            if not fetched:
+                fetched = fetch_saved_images(generation_started, params["width"], params["height"])
+            images.extend(fetched)
 
         return {
             "images": images,
