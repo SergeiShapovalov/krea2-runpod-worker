@@ -21,6 +21,11 @@ from PIL import Image
 COMFY_URL = "http://127.0.0.1:8188"
 COMFY_MODELS = Path("/comfyui/models")
 COMFY_OUTPUT = Path("/comfyui/output")
+COMFY_OUTPUT_DIRS = [
+    COMFY_OUTPUT,
+    Path("/comfyui/user/default/output"),
+    Path("/workspace/ComfyUI/output"),
+]
 LORA_DIR = COMFY_MODELS / "loras"
 
 CUSTOM_MODEL_FILENAME = "redcraftKREA2RedMix_krea2Edition.safetensors"
@@ -188,6 +193,7 @@ def build_workflow(params: dict, lora_name: str = "") -> dict:
         },
         "56": {"class_type": "VAEDecode", "inputs": {"samples": ["54", 0], "vae": ["58", 0]}},
         "29": {"class_type": "SaveImage", "inputs": {"filename_prefix": "krea2_runpod", "images": ["56", 0]}},
+        "30": {"class_type": "PreviewImage", "inputs": {"images": ["56", 0]}},
     }
 
     if use_lora:
@@ -280,21 +286,68 @@ def fetch_images(history: dict, requested_width: int, requested_height: int) -> 
 
 
 def fetch_saved_images(since: float, requested_width: int, requested_height: int) -> list[dict]:
-    if not COMFY_OUTPUT.exists():
-        return []
-    candidates = sorted(
-        [
+    candidates = []
+    for output_dir in COMFY_OUTPUT_DIRS:
+        if not output_dir.exists():
+            continue
+        candidates.extend(
             p
-            for p in COMFY_OUTPUT.rglob("krea2_runpod*.png")
+            for p in output_dir.rglob("krea2_runpod*.png")
             if p.is_file() and p.stat().st_mtime >= since - 2
-        ],
-        key=lambda p: p.stat().st_mtime,
-    )
+        )
+    candidates = sorted(candidates, key=lambda p: p.stat().st_mtime)
     images = []
     for path in candidates:
         image = normalize_image(Image.open(path), requested_width, requested_height)
         images.append(encode_image(image, path.name))
     return images
+
+
+def summarize_history(history: dict) -> dict:
+    outputs = {}
+    for node_id, output in (history.get("outputs") or {}).items():
+        node_summary = {}
+        for key, value in output.items():
+            if key == "images" and isinstance(value, list):
+                node_summary[key] = [
+                    {
+                        "filename": item.get("filename"),
+                        "subfolder": item.get("subfolder", ""),
+                        "type": item.get("type", "output"),
+                    }
+                    for item in value
+                    if isinstance(item, dict)
+                ]
+            else:
+                node_summary[key] = value
+        outputs[node_id] = node_summary
+    return {
+        "outputs": outputs,
+        "status": history.get("status"),
+    }
+
+
+def list_output_files(since: float) -> list[dict]:
+    files = []
+    for output_dir in COMFY_OUTPUT_DIRS:
+        if not output_dir.exists():
+            files.append({"dir": str(output_dir), "exists": False})
+            continue
+        for path in output_dir.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+                continue
+            stat = path.stat()
+            if stat.st_mtime < since - 10:
+                continue
+            files.append(
+                {
+                    "dir": str(output_dir),
+                    "path": str(path.relative_to(output_dir)),
+                    "size": stat.st_size,
+                    "mtime": round(stat.st_mtime, 3),
+                }
+            )
+    return sorted(files, key=lambda item: item.get("mtime", 0))[-50:]
 
 
 def normalize_input(job_input: dict) -> dict:
@@ -317,6 +370,7 @@ def normalize_input(job_input: dict) -> dict:
         "lora_strength_model": float(job_input.get("lora_strength_model", 1.0)),
         "lora_strength_clip": float(job_input.get("lora_strength_clip", 1.0)),
         "zero_negative": bool(job_input.get("zero_negative", True)),
+        "debug": bool(job_input.get("debug", False)),
         "timeout": int(job_input.get("timeout", 900)),
     }
     if not params["prompt"]:
@@ -343,6 +397,7 @@ def handler(job: dict) -> dict:
 
         images = []
         seeds = []
+        debug_runs = []
         base_seed = int(params["seed"])
         for index in range(params["num_images"]):
             params["seed"] = base_seed + index
@@ -354,9 +409,18 @@ def handler(job: dict) -> dict:
             fetched = fetch_images(history, params["width"], params["height"])
             if not fetched:
                 fetched = fetch_saved_images(generation_started, params["width"], params["height"])
+            if params["debug"] or not fetched:
+                debug_runs.append(
+                    {
+                        "seed": params["seed"],
+                        "prompt_id": prompt_id,
+                        "history": summarize_history(history),
+                        "output_files": list_output_files(generation_started),
+                    }
+                )
             images.extend(fetched)
 
-        return {
+        result = {
             "images": images,
             "meta": {
                 "seconds": round(time.time() - started, 3),
@@ -369,6 +433,9 @@ def handler(job: dict) -> dict:
                 "model_repo_id": os.environ.get("MODEL_REPO_ID", "pakkonen/krea2-base-bundle"),
             },
         }
+        if debug_runs:
+            result["debug"] = debug_runs
+        return result
     except Exception as exc:
         log(f"error: {exc}")
         return {"error": str(exc), "seconds": round(time.time() - started, 3)}
