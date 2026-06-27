@@ -33,7 +33,7 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/krea2-runpod-worker
           tags: |
-            type=raw,value=v0.1.6
+            type=raw,value=v0.1.7
             type=sha,prefix=sha-
 
       - name: Build and push

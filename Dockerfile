@@ -6,6 +6,8 @@ ENV PYTHONUNBUFFERED=1 \
     COMFY_LOG_LEVEL=INFO \
     COMFY_API_AVAILABLE_INTERVAL_MS=500
 
+COPY check_comfy_kitchen.py /tmp/check_comfy_kitchen.py
+
 RUN cd /comfyui \
     && git fetch origin master \
     && git checkout -B master origin/master \
@@ -14,7 +16,7 @@ RUN cd /comfyui \
          [ -f "$r" ] && uv pip install -r "$r" || true; \
        done \
     && uv pip install "transformers>=4.50.3,<5" "huggingface-hub<1.0" "comfy-kitchen==0.2.13" \
-    && python -c 'from comfy_kitchen.tensor import TensorCoreFP8Layout, get_layout_class; import comfy.quant_ops as quant_ops; assert TensorCoreFP8Layout is not None; assert quant_ops._CK_AVAILABLE is True; assert get_layout_class("TensorCoreFP8Layout") is not None' \
+    && python /tmp/check_comfy_kitchen.py \
     && python /comfyui/main.py --quick-test-for-ci --cpu
 
 COPY prepare_models.py /prepare_models.py
