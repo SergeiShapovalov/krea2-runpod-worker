@@ -13,7 +13,8 @@ RUN cd /comfyui \
     && for r in /comfyui/custom_nodes/*/requirements.txt; do \
          [ -f "$r" ] && uv pip install -r "$r" || true; \
        done \
-    && uv pip install "transformers>=4.50.3,<5" "huggingface-hub<1.0" \
+    && uv pip install "transformers>=4.50.3,<5" "huggingface-hub<1.0" "comfy-kitchen==0.2.13" \
+    && python -c "import comfy_kitchen" \
     && python /comfyui/main.py --quick-test-for-ci --cpu
 
 COPY prepare_models.py /prepare_models.py
