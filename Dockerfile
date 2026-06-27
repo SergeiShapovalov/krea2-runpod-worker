@@ -7,7 +7,8 @@ ENV PYTHONUNBUFFERED=1 \
     COMFY_API_AVAILABLE_INTERVAL_MS=500
 
 RUN cd /comfyui \
-    && git pull --ff-only \
+    && git fetch origin master \
+    && git checkout -B master origin/master \
     && uv pip install -r /comfyui/requirements.txt \
     && for r in /comfyui/custom_nodes/*/requirements.txt; do \
          [ -f "$r" ] && uv pip install -r "$r" || true; \
