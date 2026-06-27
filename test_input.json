@@ -1,0 +1,22 @@
+{
+  "input": {
+    "prompt": "TOK woman, cinematic editorial portrait, realistic photography, looking at camera, soft window light, 85mm lens, shallow depth of field, natural skin texture",
+    "negative_prompt": "",
+    "width": 1080,
+    "height": 1920,
+    "steps": 12,
+    "cfg": 1.0,
+    "sampler": "euler",
+    "scheduler": "simple",
+    "denoise": 1.0,
+    "seed": 123456789,
+    "num_images": 1,
+    "batch_size": 1,
+    "use_lora": true,
+    "lora_source": "pakkonen/tok",
+    "lora_filename": "pytorch_lora_weights.safetensors",
+    "lora_strength_model": 1.0,
+    "lora_strength_clip": 1.0,
+    "zero_negative": true
+  }
+}
