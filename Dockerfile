@@ -1,6 +1,7 @@
 FROM runpod/worker-comfyui:5.8.6-base
 
 ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/comfyui \
     MODEL_REPO_ID=pakkonen/krea2-base-bundle \
     MODEL_CACHE_WAIT_SECONDS=900 \
     COMFY_LOG_LEVEL=INFO \
@@ -11,13 +12,13 @@ COPY check_comfy_kitchen.py /tmp/check_comfy_kitchen.py
 RUN cd /comfyui \
     && git fetch origin master \
     && git checkout -B master origin/master \
-    && uv pip install -r /comfyui/requirements.txt \
+    && uv pip install --python /opt/venv/bin/python -r /comfyui/requirements.txt \
     && for r in /comfyui/custom_nodes/*/requirements.txt; do \
-         [ -f "$r" ] && uv pip install -r "$r" || true; \
+         [ -f "$r" ] && uv pip install --python /opt/venv/bin/python -r "$r" || true; \
        done \
-    && uv pip install "transformers>=4.50.3,<5" "huggingface-hub<1.0" "comfy-kitchen==0.2.13" \
-    && python /tmp/check_comfy_kitchen.py \
-    && python /comfyui/main.py --quick-test-for-ci --cpu
+    && uv pip install --python /opt/venv/bin/python "transformers>=4.50.3,<5" "huggingface-hub<1.0" "comfy-kitchen==0.2.13" \
+    && /opt/venv/bin/python /tmp/check_comfy_kitchen.py \
+    && /opt/venv/bin/python /comfyui/main.py --quick-test-for-ci --cpu
 
 COPY prepare_models.py /prepare_models.py
 COPY handler.py /handler.py
