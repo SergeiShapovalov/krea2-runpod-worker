@@ -276,6 +276,7 @@ def normalize_image(image: Image.Image, requested_width: int, requested_height: 
 
 def fetch_images(history: dict, requested_width: int, requested_height: int) -> list[dict]:
     images = []
+    seen = set()
     for output in history.get("outputs", {}).values():
         for item in output.get("images", []):
             response = requests.get(
@@ -284,7 +285,12 @@ def fetch_images(history: dict, requested_width: int, requested_height: int) -> 
             )
             response.raise_for_status()
             image = normalize_image(Image.open(io.BytesIO(response.content)), requested_width, requested_height)
-            images.append(encode_image(image, item["filename"]))
+            encoded = encode_image(image, item["filename"])
+            fingerprint = hashlib.sha1(encoded["data"].encode("utf-8")).hexdigest()
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            images.append(encoded)
     return images
 
 
