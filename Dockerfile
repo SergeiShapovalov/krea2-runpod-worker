@@ -16,7 +16,7 @@ RUN cd /comfyui \
     && for r in /comfyui/custom_nodes/*/requirements.txt; do \
          [ -f "$r" ] && uv pip install --python /opt/venv/bin/python -r "$r" || true; \
        done \
-    && uv pip install --python /opt/venv/bin/python "transformers>=4.50.3,<5" "huggingface-hub<1.0" "comfy-kitchen==0.2.13" \
+    && uv pip install --python /opt/venv/bin/python "transformers>=4.50.3,<5" "huggingface-hub<1.0" "websocket-client>=1.8,<2" "comfy-kitchen==0.2.13" \
     && /opt/venv/bin/python /tmp/check_comfy_kitchen.py \
     && /opt/venv/bin/python /comfyui/main.py --quick-test-for-ci --cpu
 

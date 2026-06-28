@@ -13,22 +13,18 @@ import time
 import traceback
 import uuid
 from pathlib import Path
-from urllib.parse import unquote, urlencode, urlparse
+from urllib.parse import unquote, urlparse
 
 import requests
 import runpod
+import websocket
 from huggingface_hub import hf_hub_download
 from PIL import Image
 
 
 COMFY_URL = "http://127.0.0.1:8188"
+COMFY_WS_URL = "ws://127.0.0.1:8188/ws"
 COMFY_MODELS = Path("/comfyui/models")
-COMFY_OUTPUT = Path("/comfyui/output")
-COMFY_OUTPUT_DIRS = [
-    COMFY_OUTPUT,
-    Path("/comfyui/user/default/output"),
-    Path("/workspace/ComfyUI/output"),
-]
 LORA_DIR = COMFY_MODELS / "loras"
 
 CUSTOM_MODEL_FILENAME = "redcraftKREA2RedMix_krea2Edition.safetensors"
@@ -195,8 +191,7 @@ def build_workflow(params: dict, lora_name: str = "") -> dict:
             },
         },
         "56": {"class_type": "VAEDecode", "inputs": {"samples": ["54", 0], "vae": ["58", 0]}},
-        "29": {"class_type": "SaveImage", "inputs": {"filename_prefix": "krea2_runpod", "images": ["56", 0]}},
-        "30": {"class_type": "PreviewImage", "inputs": {"images": ["56", 0]}},
+        "30": {"class_type": "SaveImageWebsocket", "inputs": {"images": ["56", 0]}},
     }
 
     if use_lora:
@@ -213,10 +208,10 @@ def build_workflow(params: dict, lora_name: str = "") -> dict:
     return workflow
 
 
-def queue_prompt(workflow: dict) -> str:
+def queue_prompt(workflow: dict, client_id: str) -> str:
     response = requests.post(
         f"{COMFY_URL}/prompt",
-        json={"prompt": workflow, "client_id": str(uuid.uuid4())},
+        json={"prompt": workflow, "client_id": client_id},
         timeout=30,
     )
     if response.status_code >= 400:
@@ -225,7 +220,7 @@ def queue_prompt(workflow: dict) -> str:
             object_info = requests.get(f"{COMFY_URL}/object_info", timeout=10).json()
             interesting = {
                 key: object_info.get(key)
-                for key in ["UNETLoader", "CLIPLoader", "VAELoader", "LoraLoader", "KSampler"]
+                for key in ["UNETLoader", "CLIPLoader", "VAELoader", "LoraLoader", "KSampler", "SaveImageWebsocket"]
                 if key in object_info
             }
             details += "\nobject_info=" + json.dumps(interesting, ensure_ascii=False)[:6000]
@@ -239,16 +234,10 @@ def queue_prompt(workflow: dict) -> str:
     return data["prompt_id"]
 
 
-def wait_for_history(prompt_id: str, timeout: int) -> dict:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        response = requests.get(f"{COMFY_URL}/history/{prompt_id}", timeout=30)
-        response.raise_for_status()
-        history = response.json()
-        if prompt_id in history:
-            return history[prompt_id]
-        time.sleep(1)
-    raise RuntimeError("Generation timed out.")
+def connect_websocket(client_id: str) -> websocket.WebSocket:
+    ws = websocket.WebSocket()
+    ws.connect(f"{COMFY_WS_URL}?clientId={client_id}", timeout=30)
+    return ws
 
 
 def encode_image(image: Image.Image, filename: str) -> dict:
@@ -274,41 +263,58 @@ def normalize_image(image: Image.Image, requested_width: int, requested_height: 
     return image
 
 
-def fetch_images(history: dict, requested_width: int, requested_height: int) -> list[dict]:
+def decode_websocket_image(payload: bytes) -> Image.Image:
+    # ComfyUI websocket image frames include an 8-byte binary event header.
+    for candidate in (payload[8:], payload):
+        try:
+            return Image.open(io.BytesIO(candidate))
+        except Exception:
+            continue
+    raise RuntimeError("Could not decode websocket image payload.")
+
+
+def wait_for_websocket_images(
+    ws: websocket.WebSocket,
+    prompt_id: str,
+    requested_width: int,
+    requested_height: int,
+    seed: int,
+    timeout: int,
+) -> list[dict]:
+    deadline = time.time() + timeout
+    current_node = None
     images = []
     seen = set()
-    for output in history.get("outputs", {}).values():
-        for item in output.get("images", []):
-            response = requests.get(
-                f"{COMFY_URL}/view?{urlencode({'filename': item['filename'], 'subfolder': item.get('subfolder', ''), 'type': item.get('type', 'output')})}",
-                timeout=60,
-            )
-            response.raise_for_status()
-            image = normalize_image(Image.open(io.BytesIO(response.content)), requested_width, requested_height)
-            encoded = encode_image(image, item["filename"])
-            fingerprint = hashlib.sha1(encoded["data"].encode("utf-8")).hexdigest()
-            if fingerprint in seen:
+
+    while time.time() < deadline:
+        ws.settimeout(max(1, min(30, int(deadline - time.time()))))
+        message = ws.recv()
+        if isinstance(message, str):
+            event = json.loads(message)
+            data = event.get("data") or {}
+            if data.get("prompt_id") != prompt_id:
                 continue
-            seen.add(fingerprint)
-            images.append(encoded)
-    return images
-
-
-def fetch_saved_images(since: float, requested_width: int, requested_height: int) -> list[dict]:
-    candidates = []
-    for output_dir in COMFY_OUTPUT_DIRS:
-        if not output_dir.exists():
+            if event.get("type") == "execution_error":
+                raise RuntimeError(json.dumps(data, ensure_ascii=False)[:4000])
+            if event.get("type") == "executing":
+                current_node = data.get("node")
+                if current_node is None:
+                    break
             continue
-        candidates.extend(
-            p
-            for p in output_dir.rglob("krea2_runpod*.png")
-            if p.is_file() and p.stat().st_mtime >= since - 2
-        )
-    candidates = sorted(candidates, key=lambda p: p.stat().st_mtime)
-    images = []
-    for path in candidates:
-        image = normalize_image(Image.open(path), requested_width, requested_height)
-        images.append(encode_image(image, path.name))
+
+        if current_node != "30":
+            continue
+
+        image = normalize_image(decode_websocket_image(message), requested_width, requested_height)
+        encoded = encode_image(image, f"krea2_websocket_seed{seed}_{len(images) + 1}.png")
+        fingerprint = hashlib.sha1(encoded["data"].encode("utf-8")).hexdigest()
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        images.append(encoded)
+
+    if not images:
+        raise RuntimeError("No image received from SaveImageWebsocket.")
     return images
 
 
@@ -334,30 +340,6 @@ def summarize_history(history: dict) -> dict:
         "outputs": outputs,
         "status": history.get("status"),
     }
-
-
-def list_output_files(since: float) -> list[dict]:
-    files = []
-    for output_dir in COMFY_OUTPUT_DIRS:
-        if not output_dir.exists():
-            files.append({"dir": str(output_dir), "exists": False})
-            continue
-        for path in output_dir.rglob("*"):
-            if not path.is_file() or path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
-                continue
-            stat = path.stat()
-            if stat.st_mtime < since - 10:
-                continue
-            files.append(
-                {
-                    "dir": str(output_dir),
-                    "path": str(path.relative_to(output_dir)),
-                    "size": stat.st_size,
-                    "mtime": round(stat.st_mtime, 3),
-                }
-            )
-    return sorted(files, key=lambda item: item.get("mtime", 0))[-50:]
-
 
 def runtime_diagnostics() -> dict:
     diagnostics = {
@@ -473,19 +455,27 @@ def handler(job: dict) -> dict:
             params["seed"] = base_seed + index
             seeds.append(params["seed"])
             workflow = build_workflow(params, lora_name=lora_name)
-            generation_started = time.time()
-            prompt_id = queue_prompt(workflow)
-            history = wait_for_history(prompt_id, timeout=params["timeout"])
-            fetched = fetch_images(history, params["width"], params["height"])
-            if not fetched:
-                fetched = fetch_saved_images(generation_started, params["width"], params["height"])
+            client_id = str(uuid.uuid4())
+            ws = connect_websocket(client_id)
+            try:
+                prompt_id = queue_prompt(workflow, client_id)
+                fetched = wait_for_websocket_images(
+                    ws,
+                    prompt_id,
+                    params["width"],
+                    params["height"],
+                    params["seed"],
+                    params["timeout"],
+                )
+            finally:
+                ws.close()
             if params["debug"] or not fetched:
+                history = requests.get(f"{COMFY_URL}/history/{prompt_id}", timeout=30).json().get(prompt_id, {})
                 debug_runs.append(
                     {
                         "seed": params["seed"],
                         "prompt_id": prompt_id,
                         "history": summarize_history(history),
-                        "output_files": list_output_files(generation_started),
                     }
                 )
             images.extend(fetched)

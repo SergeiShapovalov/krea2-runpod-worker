@@ -15,3 +15,4 @@ At worker startup `prepare_models.py` waits for Runpod's HF model cache and syml
 - `vae/qwen_image_vae.safetensors`
 
 The handler accepts a compact JSON generation request and returns PNG images as base64.
+Generated images are received from ComfyUI through `SaveImageWebsocket`; the workflow does not use `SaveImage` output files.
