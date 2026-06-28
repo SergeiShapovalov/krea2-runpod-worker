@@ -25,12 +25,26 @@ from PIL import Image
 COMFY_URL = "http://127.0.0.1:8188"
 COMFY_WS_URL = "ws://127.0.0.1:8188/ws"
 COMFY_MODELS = Path("/comfyui/models")
+DIFFUSION_DIR = COMFY_MODELS / "diffusion_models"
 LORA_DIR = COMFY_MODELS / "loras"
 
 CUSTOM_MODEL_FILENAME = "redcraftKREA2RedMix_krea2Edition.safetensors"
 CLIP_FILENAME = "qwen3vl_4b_fp8_scaled.safetensors"
 VAE_FILENAME = "qwen_image_vae.safetensors"
 DEFAULT_LORA_FILENAME = os.environ.get("DEFAULT_LORA_FILENAME", "pytorch_lora_weights.safetensors")
+DEFAULT_MODEL_ALIAS = os.environ.get("DEFAULT_MODEL_ALIAS", "redcraft")
+MODEL_ZOO_REPO_ID = os.environ.get("MODEL_ZOO_REPO_ID", "pakkonen/krea2-model-zoo")
+MODEL_MANIFEST_FILENAME = os.environ.get("MODEL_MANIFEST_FILENAME", "models.json")
+RUNPOD_HF_CACHE = Path(os.environ.get("HF_HUB_CACHE") or "/runpod-volume/huggingface-cache/hub")
+
+BUILTIN_MODELS = {
+    "redcraft": {
+        "repo_id": os.environ.get("MODEL_REPO_ID", "pakkonen/krea2-base-bundle"),
+        "filename": f"diffusion_models/{CUSTOM_MODEL_FILENAME}",
+        "local_name": CUSTOM_MODEL_FILENAME,
+    },
+}
+_MODEL_MANIFEST_CACHE: dict | None = None
 
 SAMPLERS = {
     "er_sde",
@@ -78,6 +92,35 @@ def safe_filename(name: str, fallback: str = "custom_lora.safetensors") -> str:
     return cleaned
 
 
+def hf_token() -> str | None:
+    return os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
+
+
+def hf_download(repo_id: str, filename: str, *, force_download: bool = False) -> Path:
+    kwargs = {
+        "repo_id": repo_id,
+        "filename": filename,
+        "token": hf_token(),
+        "force_download": force_download,
+    }
+    if RUNPOD_HF_CACHE.exists() or RUNPOD_HF_CACHE.parent.exists():
+        kwargs["cache_dir"] = str(RUNPOD_HF_CACHE)
+    return Path(hf_hub_download(**kwargs))
+
+
+def link_or_replace(src: Path, dest: Path) -> str:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists() or dest.is_symlink():
+        try:
+            if dest.resolve() == src.resolve():
+                return dest.name
+        except FileNotFoundError:
+            pass
+        dest.unlink()
+    dest.symlink_to(src)
+    return dest.name
+
+
 def infer_lora_name_from_url(url: str) -> str:
     parsed = urlparse(url)
     candidate = unquote(Path(parsed.path).name)
@@ -93,6 +136,13 @@ def lora_cache_name(source: str, filename: str | None = None) -> str:
     if stem == "custom_lora":
         stem = "lora"
     return safe_filename(f"{stem}_{source_hash}.safetensors")
+
+
+def model_cache_name(source: str, filename: str | None = None, alias: str | None = None) -> str:
+    source_hash = hashlib.sha1(f"{source}|{filename or ''}".encode("utf-8")).hexdigest()[:10]
+    base_name = alias or filename or unquote(Path(urlparse(source).path).name) or "custom_model.safetensors"
+    stem = Path(safe_filename(Path(base_name).name, fallback="custom_model.safetensors")).stem
+    return safe_filename(f"{stem}_{source_hash}.safetensors", fallback="custom_model.safetensors")
 
 
 def download_stream(url: str, dest: Path) -> None:
@@ -148,16 +198,102 @@ def ensure_lora(lora_source: str, lora_filename: str) -> str:
     if lora_path.exists() and lora_path.stat().st_size > 1_000_000:
         return lora_path.name
 
-    downloaded = hf_hub_download(
-        repo_id=source,
-        filename=file_in_repo,
-        token=os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None,
-    )
+    downloaded = hf_download(source, file_in_repo)
     shutil.copyfile(downloaded, lora_path)
     return lora_path.name
 
 
-def build_workflow(params: dict, lora_name: str = "") -> dict:
+def load_model_manifest() -> dict:
+    global _MODEL_MANIFEST_CACHE
+    manifest = {"default": DEFAULT_MODEL_ALIAS, "models": dict(BUILTIN_MODELS)}
+    try:
+        manifest_path = hf_download(MODEL_ZOO_REPO_ID, MODEL_MANIFEST_FILENAME, force_download=True)
+        remote = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if isinstance(remote.get("models"), dict):
+            manifest["models"].update(remote["models"])
+        if remote.get("default"):
+            manifest["default"] = str(remote["default"])
+    except Exception as exc:
+        if _MODEL_MANIFEST_CACHE is not None:
+            return _MODEL_MANIFEST_CACHE
+        log(f"model manifest unavailable, using built-ins: {exc}")
+    _MODEL_MANIFEST_CACHE = manifest
+    return manifest
+
+
+def ensure_model_from_source(source: str, filename: str, alias: str | None = None) -> str:
+    source = (source or "").strip()
+    filename = (filename or "").strip()
+    if not source:
+        raise RuntimeError("Model source is empty.")
+
+    DIFFUSION_DIR.mkdir(parents=True, exist_ok=True)
+    if source.startswith(("http://", "https://")):
+        hf_blob = normalize_hf_blob_url(source)
+        if hf_blob:
+            repo_id, file_in_repo = hf_blob
+            return ensure_model_from_source(f"hf://{repo_id}", file_in_repo, alias=alias)
+        local_name = model_cache_name(source, alias=alias)
+        model_path = DIFFUSION_DIR / local_name
+        download_stream(source, model_path)
+        return model_path.name
+
+    if source.startswith("hf://"):
+        source = source[5:]
+    if "/" not in source:
+        local_path = DIFFUSION_DIR / safe_filename(source, fallback="custom_model.safetensors")
+        if local_path.exists() and local_path.stat().st_size > 1_000_000:
+            return local_path.name
+        raise RuntimeError(f"Model source is not an HF repo id, URL, or local model filename: {source}")
+    if not filename:
+        raise RuntimeError("model_filename is required when model_source is an HF repo id.")
+
+    local_name = model_cache_name(source, filename, alias=alias)
+    local_path = DIFFUSION_DIR / local_name
+    if local_path.exists() and local_path.stat().st_size > 1_000_000:
+        return local_path.name
+
+    downloaded = hf_download(source, filename)
+    return link_or_replace(downloaded, local_path)
+
+
+def ensure_model(model: str, model_source: str = "", model_filename: str = "") -> tuple[str, str]:
+    requested = (model or "").strip() or DEFAULT_MODEL_ALIAS
+    source = (model_source or "").strip()
+    filename = (model_filename or "").strip()
+
+    if source:
+        return ensure_model_from_source(source, filename, alias=requested), requested
+    if requested.startswith(("http://", "https://")):
+        return ensure_model_from_source(requested, filename, alias=None), requested
+    if requested.startswith("hf://") or ("/" in requested and filename):
+        return ensure_model_from_source(requested, filename, alias=Path(filename).stem or None), requested
+
+    local_path = DIFFUSION_DIR / safe_filename(requested, fallback="custom_model.safetensors")
+    if local_path.exists() and local_path.stat().st_size > 1_000_000:
+        return local_path.name, requested
+
+    manifest = load_model_manifest()
+    alias = manifest.get("default", DEFAULT_MODEL_ALIAS) if requested in {"default", "base"} else requested
+    entry = (manifest.get("models") or {}).get(alias)
+    if not isinstance(entry, dict):
+        available = ", ".join(sorted((manifest.get("models") or {}).keys()))
+        raise RuntimeError(f"Unknown model '{requested}'. Available models: {available}")
+
+    local_name = entry.get("local_name")
+    if local_name:
+        local_path = DIFFUSION_DIR / safe_filename(str(local_name), fallback="custom_model.safetensors")
+        if local_path.exists() and local_path.stat().st_size > 1_000_000:
+            return local_path.name, alias
+
+    return ensure_model_from_source(
+        str(entry.get("repo_id") or MODEL_ZOO_REPO_ID),
+        str(entry.get("filename") or ""),
+        alias=alias,
+    ), alias
+
+
+def build_workflow(params: dict, lora_name: str = "", model_name: str = CUSTOM_MODEL_FILENAME) -> dict:
     requested_width = int(params["width"])
     requested_height = int(params["height"])
     internal_width = round_up(requested_width, 16)
@@ -168,7 +304,7 @@ def build_workflow(params: dict, lora_name: str = "") -> dict:
     negative_node = "55" if params["zero_negative"] else "59"
 
     workflow = {
-        "52": {"class_type": "UNETLoader", "inputs": {"unet_name": CUSTOM_MODEL_FILENAME, "weight_dtype": "default"}},
+        "52": {"class_type": "UNETLoader", "inputs": {"unet_name": model_name, "weight_dtype": "default"}},
         "53": {"class_type": "CLIPLoader", "inputs": {"clip_name": CLIP_FILENAME, "type": "krea2", "device": "default"}},
         "58": {"class_type": "VAELoader", "inputs": {"vae_name": VAE_FILENAME}},
         "57": {"class_type": "EmptyLatentImage", "inputs": {"width": internal_width, "height": internal_height, "batch_size": int(params["batch_size"])}},
@@ -391,12 +527,29 @@ def runtime_diagnostics() -> dict:
     except Exception:
         diagnostics["comfy_quant_ops_error"] = traceback.format_exc(limit=12)
 
+    try:
+        manifest = load_model_manifest()
+        diagnostics["model_manifest"] = {
+            "repo_id": MODEL_ZOO_REPO_ID,
+            "filename": MODEL_MANIFEST_FILENAME,
+            "default": manifest.get("default"),
+            "aliases": sorted((manifest.get("models") or {}).keys()),
+        }
+        diagnostics["local_diffusion_models"] = sorted(
+            p.name for p in DIFFUSION_DIR.glob("*.safetensors") if p.exists()
+        )
+    except Exception:
+        diagnostics["model_manifest_error"] = traceback.format_exc(limit=8)
+
     return diagnostics
 
 
 def normalize_input(job_input: dict) -> dict:
     params = {
         "diagnostics_only": bool(job_input.get("diagnostics_only", False)),
+        "model": str(job_input.get("model") or job_input.get("model_alias") or DEFAULT_MODEL_ALIAS).strip(),
+        "model_source": str(job_input.get("model_source") or job_input.get("model_repo_id") or ""),
+        "model_filename": str(job_input.get("model_filename") or ""),
         "prompt": str(job_input.get("prompt") or "").strip(),
         "negative_prompt": str(job_input.get("negative_prompt") or ""),
         "width": int(job_input.get("width", 1080)),
@@ -445,6 +598,7 @@ def handler(job: dict) -> dict:
                 "diagnostics": runtime_diagnostics(),
                 "seconds": round(time.time() - started, 3),
             }
+        model_name, model_alias = ensure_model(params["model"], params["model_source"], params["model_filename"])
         lora_name = ensure_lora(params["lora_source"], params["lora_filename"]) if params["use_lora"] else ""
 
         images = []
@@ -454,7 +608,7 @@ def handler(job: dict) -> dict:
         for index in range(params["num_images"]):
             params["seed"] = base_seed + index
             seeds.append(params["seed"])
-            workflow = build_workflow(params, lora_name=lora_name)
+            workflow = build_workflow(params, lora_name=lora_name, model_name=model_name)
             client_id = str(uuid.uuid4())
             ws = connect_websocket(client_id)
             try:
@@ -489,8 +643,11 @@ def handler(job: dict) -> dict:
                 "scheduler": params["scheduler"],
                 "steps": params["steps"],
                 "cfg": params["cfg"],
+                "model": model_alias,
+                "model_name": model_name,
                 "lora_name": lora_name,
                 "model_repo_id": os.environ.get("MODEL_REPO_ID", "pakkonen/krea2-base-bundle"),
+                "model_zoo_repo_id": MODEL_ZOO_REPO_ID,
             },
         }
         if debug_runs:

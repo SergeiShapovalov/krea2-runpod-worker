@@ -16,3 +16,10 @@ At worker startup `prepare_models.py` waits for Runpod's HF model cache and syml
 
 The handler accepts a compact JSON generation request and returns PNG images as base64.
 Generated images are received from ComfyUI through `SaveImageWebsocket`; the workflow does not use `SaveImage` output files.
+
+The request can select the diffusion checkpoint with:
+
+- `model`: alias from `pakkonen/krea2-model-zoo/models.json`, for example `redcraft` or `civitai-3075206`.
+- `model_source` + `model_filename`: override with an HF repo/file, HF file URL, or direct `.safetensors` URL.
+
+Downloaded HF checkpoint files are symlinked from the HF cache into ComfyUI's `diffusion_models` directory to avoid duplicating large files.
