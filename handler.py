@@ -96,13 +96,21 @@ def hf_token() -> str | None:
     return os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
 
 
-def hf_download(repo_id: str, filename: str, *, force_download: bool = False) -> Path:
+def hf_download(
+    repo_id: str,
+    filename: str,
+    *,
+    force_download: bool = False,
+    revision: str | None = None,
+) -> Path:
     kwargs = {
         "repo_id": repo_id,
         "filename": filename,
         "token": hf_token(),
         "force_download": force_download,
     }
+    if revision:
+        kwargs["revision"] = revision
     if RUNPOD_HF_CACHE.exists() or RUNPOD_HF_CACHE.parent.exists():
         kwargs["cache_dir"] = str(RUNPOD_HF_CACHE)
     return Path(hf_hub_download(**kwargs))
@@ -138,8 +146,15 @@ def lora_cache_name(source: str, filename: str | None = None) -> str:
     return safe_filename(f"{stem}_{source_hash}.safetensors")
 
 
-def model_cache_name(source: str, filename: str | None = None, alias: str | None = None) -> str:
-    source_hash = hashlib.sha1(f"{source}|{filename or ''}".encode("utf-8")).hexdigest()[:10]
+def model_cache_name(
+    source: str,
+    filename: str | None = None,
+    alias: str | None = None,
+    revision: str | None = None,
+) -> str:
+    source_hash = hashlib.sha1(
+        f"{source}|{filename or ''}|{revision or ''}".encode("utf-8")
+    ).hexdigest()[:10]
     base_name = alias or filename or unquote(Path(urlparse(source).path).name) or "custom_model.safetensors"
     stem = Path(safe_filename(Path(base_name).name, fallback="custom_model.safetensors")).stem
     return safe_filename(f"{stem}_{source_hash}.safetensors", fallback="custom_model.safetensors")
@@ -221,7 +236,12 @@ def load_model_manifest() -> dict:
     return manifest
 
 
-def ensure_model_from_source(source: str, filename: str, alias: str | None = None) -> str:
+def ensure_model_from_source(
+    source: str,
+    filename: str,
+    alias: str | None = None,
+    revision: str | None = None,
+) -> str:
     source = (source or "").strip()
     filename = (filename or "").strip()
     if not source:
@@ -233,7 +253,7 @@ def ensure_model_from_source(source: str, filename: str, alias: str | None = Non
         if hf_blob:
             repo_id, file_in_repo = hf_blob
             return ensure_model_from_source(f"hf://{repo_id}", file_in_repo, alias=alias)
-        local_name = model_cache_name(source, alias=alias)
+        local_name = model_cache_name(source, alias=alias, revision=revision)
         model_path = DIFFUSION_DIR / local_name
         download_stream(source, model_path)
         return model_path.name
@@ -248,12 +268,12 @@ def ensure_model_from_source(source: str, filename: str, alias: str | None = Non
     if not filename:
         raise RuntimeError("model_filename is required when model_source is an HF repo id.")
 
-    local_name = model_cache_name(source, filename, alias=alias)
+    local_name = model_cache_name(source, filename, alias=alias, revision=revision)
     local_path = DIFFUSION_DIR / local_name
     if local_path.exists() and local_path.stat().st_size > 1_000_000:
         return local_path.name
 
-    downloaded = hf_download(source, filename)
+    downloaded = hf_download(source, filename, revision=revision)
     return link_or_replace(downloaded, local_path)
 
 
@@ -290,6 +310,7 @@ def ensure_model(model: str, model_source: str = "", model_filename: str = "") -
         str(entry.get("repo_id") or MODEL_ZOO_REPO_ID),
         str(entry.get("filename") or ""),
         alias=alias,
+        revision=str(entry.get("revision") or ""),
     ), alias
 
 

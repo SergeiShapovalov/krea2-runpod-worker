@@ -22,4 +22,4 @@ The request can select the diffusion checkpoint with:
 - `model`: alias from `pakkonen/krea2-model-zoo/models.json`, for example `redcraft` or `civitai-3075206`.
 - `model_source` + `model_filename`: override with an HF repo/file, HF file URL, or direct `.safetensors` URL.
 
-Downloaded HF checkpoint files are symlinked from the HF cache into ComfyUI's `diffusion_models` directory to avoid duplicating large files.
+Downloaded HF checkpoint files are symlinked from the HF cache into ComfyUI's `diffusion_models` directory to avoid duplicating large files. Model manifest entries may include a `revision` field, which is passed to Hugging Face downloads so Runpod model-reference caches for checkpoint-only branches are used instead of downloading `main` at request time.
