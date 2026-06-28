@@ -5,6 +5,8 @@ import os
 import time
 from pathlib import Path
 
+from huggingface_hub import hf_hub_download
+
 
 MODEL_REPO_ID = os.environ.get("MODEL_REPO_ID", "pakkonen/krea2-base-bundle")
 WAIT_SECONDS = int(os.environ.get("MODEL_CACHE_WAIT_SECONDS", "900"))
@@ -25,6 +27,10 @@ FILES = {
 
 def log(message: str) -> None:
     print(f"krea2-prepare: {message}", flush=True)
+
+
+def hf_token() -> str | None:
+    return os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
 
 
 def repo_cache_dir(repo_id: str) -> Path:
@@ -65,9 +71,32 @@ def wait_for_snapshot() -> Path:
         log(f"waiting for Runpod model cache for {MODEL_REPO_ID}")
         time.sleep(5)
 
-    raise RuntimeError(
-        f"Timed out waiting for cached HF model {MODEL_REPO_ID} under {RUNPOD_CACHE_ROOT}"
-    )
+    log(f"Runpod model cache not ready for {MODEL_REPO_ID}; falling back to direct HF downloads")
+    return download_bundle_files()
+
+
+def download_bundle_files() -> Path:
+    token = hf_token()
+    if not token:
+        raise RuntimeError(
+            f"Timed out waiting for cached HF model {MODEL_REPO_ID} and HF_TOKEN is not set"
+        )
+
+    RUNPOD_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    for src_rel, dest in FILES.items():
+        if dest.exists() and dest.stat().st_size > 1_000_000:
+            continue
+        log(f"downloading {MODEL_REPO_ID}/{src_rel}")
+        downloaded = Path(
+            hf_hub_download(
+                repo_id=MODEL_REPO_ID,
+                filename=src_rel,
+                token=token,
+                cache_dir=str(RUNPOD_CACHE_ROOT),
+            )
+        )
+        link_or_replace(downloaded, dest)
+    return COMFY_MODELS
 
 
 def link_or_replace(src: Path, dest: Path) -> None:
