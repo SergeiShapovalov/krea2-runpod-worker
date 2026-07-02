@@ -314,14 +314,29 @@ def ensure_model(model: str, model_source: str = "", model_filename: str = "") -
     ), alias
 
 
-def build_workflow(params: dict, lora_name: str = "", model_name: str = CUSTOM_MODEL_FILENAME) -> dict:
+def build_workflow(
+    params: dict,
+    lora_name: str = "",
+    model_name: str = CUSTOM_MODEL_FILENAME,
+    lora_specs: list[dict] | None = None,
+) -> dict:
     requested_width = int(params["width"])
     requested_height = int(params["height"])
     internal_width = round_up(requested_width, 16)
     internal_height = round_up(requested_height, 16)
-    use_lora = bool(params["use_lora"])
-    model_node = "70" if use_lora else "52"
-    clip_node = "70" if use_lora else "53"
+    if lora_specs is None:
+        lora_specs = []
+        if bool(params["use_lora"]) and lora_name:
+            lora_specs.append(
+                {
+                    "name": lora_name,
+                    "strength_model": float(params["lora_strength_model"]),
+                    "strength_clip": float(params["lora_strength_clip"]),
+                }
+            )
+    model_node = "52"
+    clip_node = "53"
+    clip_output_index = 0
     negative_node = "55" if params["zero_negative"] else "59"
 
     workflow = {
@@ -329,8 +344,8 @@ def build_workflow(params: dict, lora_name: str = "", model_name: str = CUSTOM_M
         "53": {"class_type": "CLIPLoader", "inputs": {"clip_name": CLIP_FILENAME, "type": "krea2", "device": "default"}},
         "58": {"class_type": "VAELoader", "inputs": {"vae_name": VAE_FILENAME}},
         "57": {"class_type": "EmptyLatentImage", "inputs": {"width": internal_width, "height": internal_height, "batch_size": int(params["batch_size"])}},
-        "51": {"class_type": "CLIPTextEncode", "inputs": {"text": params["prompt"], "clip": [clip_node, 1 if use_lora else 0]}},
-        "59": {"class_type": "CLIPTextEncode", "inputs": {"text": params["negative_prompt"], "clip": [clip_node, 1 if use_lora else 0]}},
+        "51": {"class_type": "CLIPTextEncode", "inputs": {"text": params["prompt"], "clip": [clip_node, clip_output_index]}},
+        "59": {"class_type": "CLIPTextEncode", "inputs": {"text": params["negative_prompt"], "clip": [clip_node, clip_output_index]}},
         "55": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["51", 0]}},
         "54": {
             "class_type": "KSampler",
@@ -351,17 +366,25 @@ def build_workflow(params: dict, lora_name: str = "", model_name: str = CUSTOM_M
         "30": {"class_type": "SaveImageWebsocket", "inputs": {"images": ["56", 0]}},
     }
 
-    if use_lora:
-        workflow["70"] = {
+    for index, spec in enumerate(lora_specs):
+        node_id = str(70 + index)
+        workflow[node_id] = {
             "class_type": "LoraLoader",
             "inputs": {
-                "model": ["52", 0],
-                "clip": ["53", 0],
-                "lora_name": lora_name,
-                "strength_model": float(params["lora_strength_model"]),
-                "strength_clip": float(params["lora_strength_clip"]),
+                "model": [model_node, 0],
+                "clip": [clip_node, clip_output_index],
+                "lora_name": str(spec["name"]),
+                "strength_model": float(spec["strength_model"]),
+                "strength_clip": float(spec["strength_clip"]),
             },
         }
+        model_node = node_id
+        clip_node = node_id
+        clip_output_index = 1
+
+    workflow["51"]["inputs"]["clip"] = [clip_node, clip_output_index]
+    workflow["59"]["inputs"]["clip"] = [clip_node, clip_output_index]
+    workflow["54"]["inputs"]["model"] = [model_node, 0]
     return workflow
 
 
@@ -588,6 +611,11 @@ def normalize_input(job_input: dict) -> dict:
         "lora_filename": str(job_input.get("lora_filename") or DEFAULT_LORA_FILENAME),
         "lora_strength_model": float(job_input.get("lora_strength_model", 1.0)),
         "lora_strength_clip": float(job_input.get("lora_strength_clip", 1.0)),
+        "use_lora_2": bool(job_input.get("use_lora_2", False)),
+        "lora_2_source": str(job_input.get("lora_2_source") or ""),
+        "lora_2_filename": str(job_input.get("lora_2_filename") or DEFAULT_LORA_FILENAME),
+        "lora_2_strength_model": float(job_input.get("lora_2_strength_model", 1.0)),
+        "lora_2_strength_clip": float(job_input.get("lora_2_strength_clip", 1.0)),
         "zero_negative": bool(job_input.get("zero_negative", True)),
         "debug": bool(job_input.get("debug", False)),
         "timeout": int(job_input.get("timeout", 900)),
@@ -606,6 +634,8 @@ def normalize_input(job_input: dict) -> dict:
         raise RuntimeError("num_images must be 1..4.")
     if not 1 <= params["batch_size"] <= 2:
         raise RuntimeError("batch_size must be 1..2.")
+    if params["use_lora_2"] and not params["use_lora"]:
+        raise RuntimeError("use_lora must be true when use_lora_2=true.")
     return params
 
 
@@ -620,7 +650,29 @@ def handler(job: dict) -> dict:
                 "seconds": round(time.time() - started, 3),
             }
         model_name, model_alias = ensure_model(params["model"], params["model_source"], params["model_filename"])
-        lora_name = ensure_lora(params["lora_source"], params["lora_filename"]) if params["use_lora"] else ""
+        lora_specs = []
+        if params["use_lora"]:
+            lora_specs.append(
+                {
+                    "slot": 1,
+                    "source": params["lora_source"],
+                    "filename": params["lora_filename"],
+                    "name": ensure_lora(params["lora_source"], params["lora_filename"]),
+                    "strength_model": params["lora_strength_model"],
+                    "strength_clip": params["lora_strength_clip"],
+                }
+            )
+        if params["use_lora_2"]:
+            lora_specs.append(
+                {
+                    "slot": 2,
+                    "source": params["lora_2_source"],
+                    "filename": params["lora_2_filename"],
+                    "name": ensure_lora(params["lora_2_source"], params["lora_2_filename"]),
+                    "strength_model": params["lora_2_strength_model"],
+                    "strength_clip": params["lora_2_strength_clip"],
+                }
+            )
 
         images = []
         seeds = []
@@ -629,7 +681,7 @@ def handler(job: dict) -> dict:
         for index in range(params["num_images"]):
             params["seed"] = base_seed + index
             seeds.append(params["seed"])
-            workflow = build_workflow(params, lora_name=lora_name, model_name=model_name)
+            workflow = build_workflow(params, model_name=model_name, lora_specs=lora_specs)
             client_id = str(uuid.uuid4())
             ws = connect_websocket(client_id)
             try:
@@ -666,7 +718,8 @@ def handler(job: dict) -> dict:
                 "cfg": params["cfg"],
                 "model": model_alias,
                 "model_name": model_name,
-                "lora_name": lora_name,
+                "lora_name": lora_specs[0]["name"] if lora_specs else "",
+                "loras": lora_specs,
                 "model_repo_id": os.environ.get("MODEL_REPO_ID", "pakkonen/krea2-base-bundle"),
                 "model_zoo_repo_id": MODEL_ZOO_REPO_ID,
             },

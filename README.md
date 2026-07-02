@@ -22,4 +22,11 @@ The request can select the diffusion checkpoint with:
 - `model`: alias from `pakkonen/krea2-model-zoo/models.json`, for example `redcraft` or `civitai-3075206`.
 - `model_source` + `model_filename`: override with an HF repo/file, HF file URL, or direct `.safetensors` URL.
 
+LoRA inputs are applied through ComfyUI `LoraLoader` nodes:
+
+- `use_lora`, `lora_source`, `lora_filename`, `lora_strength_model`, `lora_strength_clip`.
+- Optional second LoRA: `use_lora_2`, `lora_2_source`, `lora_2_filename`, `lora_2_strength_model`, `lora_2_strength_clip`.
+
+When both are enabled, the worker chains them in order: base model/clip -> LoRA 1 -> LoRA 2.
+
 Downloaded HF checkpoint files are symlinked from the HF cache into ComfyUI's `diffusion_models` directory to avoid duplicating large files. Model manifest entries may include a `revision` field, which is passed to Hugging Face downloads so Runpod model-reference caches for checkpoint-only branches are used instead of downloading `main` at request time.
