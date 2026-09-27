@@ -35,6 +35,23 @@ The release workflow uses `Dockerfile.release`, layering the handler onto the
 digest-pinned v0.1.13 image so this change does not upgrade ComfyUI/CUDA/FP8
 dependencies. `Dockerfile` remains the full runtime rebuild recipe.
 
+Runtime placement requirements:
+
+- The pinned runtime's PyTorch uses CUDA 13.0. Set the endpoint's minimum host
+  CUDA version to `13.0`; the inherited NVIDIA image banner saying 12.6.3 is
+  not the PyTorch requirement. Hosts with a 12.8 driver fail the GPU preflight.
+- REST v2 supports a narrow update:
+  `PATCH https://api.runpod.io/v2/serverless/<id>` with
+  `{"gpu":{"minCudaVersion":"13.0"}}`. This preserves GPU pools and exclusions.
+- If private HF preloading stalls before the container starts at
+  `initializing model files`, the worker supports direct authenticated downloads
+  via `MODEL_REPO_ID` and `HF_TOKEN` after `MODEL_CACHE_WAIT_SECONDS`. Removing
+  the endpoint's model references selects this path without deleting the HF
+  repository. Preserve the endpoint environment and scaling limits explicitly
+  when using legacy GraphQL `saveEndpoint`: omitted fields can reset to defaults.
+- A template update does not prove every worker has rolled forward. Check
+  `diagnostics.worker_version`, FP8 availability and a real changed-seed job.
+
 Global LoRA chaining does not assign identities to separate people. Use
 `mode="regional_inpaint"` with an existing image and non-overlapping face masks:
 
