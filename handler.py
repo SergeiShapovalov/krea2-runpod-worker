@@ -9,6 +9,7 @@ import os
 import random
 import shutil
 import sys
+import tempfile
 import time
 import traceback
 import uuid
@@ -21,10 +22,14 @@ import websocket
 from huggingface_hub import hf_hub_download
 from PIL import Image
 
+import regional_inpaint
+
 
 COMFY_URL = "http://127.0.0.1:8188"
 COMFY_WS_URL = "ws://127.0.0.1:8188/ws"
 COMFY_MODELS = Path("/comfyui/models")
+COMFY_INPUT_DIR = Path("/comfyui/input")
+WORKER_VERSION = "0.1.14"
 DIFFUSION_DIR = COMFY_MODELS / "diffusion_models"
 LORA_DIR = COMFY_MODELS / "loras"
 
@@ -414,6 +419,21 @@ def queue_prompt(workflow: dict, client_id: str) -> str:
     return data["prompt_id"]
 
 
+def build_inpaint_workflow(params: dict, model_name: str, spec: dict, image_name: str, mask_name: str) -> dict:
+    # Exactly one LoRA branches from the unpatched model/CLIP on every pass.
+    workflow = build_workflow(params, model_name=model_name, lora_specs=[spec])
+    del workflow["57"]
+    workflow.update({
+        "60": {"class_type": "LoadImage", "inputs": {"image": image_name}},
+        "61": {"class_type": "LoadImage", "inputs": {"image": mask_name}},
+        "62": {"class_type": "ImageToMask", "inputs": {"image": ["61", 0], "channel": "red"}},
+        "63": {"class_type": "VAEEncode", "inputs": {"pixels": ["60", 0], "vae": ["58", 0]}},
+        "64": {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["63", 0], "mask": ["62", 0]}},
+    })
+    workflow["54"]["inputs"]["latent_image"] = ["64", 0]
+    return workflow
+
+
 def connect_websocket(client_id: str) -> websocket.WebSocket:
     ws = websocket.WebSocket()
     ws.connect(f"{COMFY_WS_URL}?clientId={client_id}", timeout=30)
@@ -521,8 +541,67 @@ def summarize_history(history: dict) -> dict:
         "status": history.get("status"),
     }
 
+
+def execute_workflow(workflow: dict, params: dict) -> tuple[list[dict], dict | None]:
+    client_id = str(uuid.uuid4())
+    ws = connect_websocket(client_id)
+    try:
+        prompt_id = queue_prompt(workflow, client_id)
+        images = wait_for_websocket_images(
+            ws, prompt_id, params["width"], params["height"], params["seed"], params["timeout"]
+        )
+    finally:
+        ws.close()
+    debug = None
+    if params["debug"]:
+        history = requests.get(f"{COMFY_URL}/history/{prompt_id}", timeout=30).json().get(prompt_id, {})
+        debug = {"seed": params["seed"], "prompt_id": prompt_id, "history": summarize_history(history)}
+    return images, debug
+
+
+def render_regions(params: dict, model_name: str, lora_specs: list[dict]):
+    current = params["input_image"].copy()
+    specs = {spec["slot"]: spec for spec in lora_specs}
+    passes, debug_runs = [], []
+    COMFY_INPUT_DIR.mkdir(parents=True, exist_ok=True)
+    for index, region in enumerate(params["inpaint_regions"]):
+        crop, crop_mask, box = regional_inpaint.prepare_crop(current, region)
+        spec = specs[region["lora_slot"]]
+        step_params = {**params, "prompt": region["prompt"], "width": crop.width,
+                       "height": crop.height, "denoise": region["denoise"],
+                       "seed": params["seed"] + index, "batch_size": 1}
+        with tempfile.TemporaryDirectory(prefix="krea2_inpaint_", dir=COMFY_INPUT_DIR) as directory:
+            directory = Path(directory)
+            crop.save(directory / "image.png")
+            crop_mask.convert("RGB").save(directory / "mask.png")
+            workflow = build_inpaint_workflow(
+                step_params, model_name, spec,
+                f"{directory.name}/image.png", f"{directory.name}/mask.png",
+            )
+            fetched, debug = execute_workflow(workflow, step_params)
+        if len(fetched) != 1:
+            raise RuntimeError("A regional pass must return exactly one image.")
+        generated = regional_inpaint.decode_image(fetched[0]["data"], "generated crop")
+        updated = regional_inpaint.composite_crop(current, generated, region, box)
+        unchanged = regional_inpaint.unchanged_outside_mask(current, updated, region["mask"])
+        if not unchanged:
+            raise RuntimeError("Regional pass modified pixels outside its mask.")
+        current = updated
+        passes.append({"lora_slot": spec["slot"], "lora_source": spec["source"],
+                       "lora_name": spec["name"], "strength_model": spec["strength_model"],
+                       "strength_clip": spec["strength_clip"], "seed": step_params["seed"],
+                       "prompt": region["prompt"], "denoise": region["denoise"],
+                       "mask_bbox": list(region["mask"].getbbox()), "crop_bbox": list(box),
+                       "crop_size": list(crop.size), "feather": region["feather"],
+                       "loras_applied": 1, "unchanged_outside_mask": unchanged})
+        if debug:
+            debug_runs.append(debug)
+    return [encode_image(current, f"krea2_regional_seed{params['seed']}.png")], passes, debug_runs
+
 def runtime_diagnostics() -> dict:
     diagnostics = {
+        "worker_version": WORKER_VERSION,
+        "modes": ["generate", "regional_inpaint"],
         "python": sys.version,
         "executable": sys.executable,
     }
@@ -590,6 +669,7 @@ def runtime_diagnostics() -> dict:
 
 def normalize_input(job_input: dict) -> dict:
     params = {
+        "mode": str(job_input.get("mode", "generate")),
         "diagnostics_only": bool(job_input.get("diagnostics_only", False)),
         "model": str(job_input.get("model") or job_input.get("model_alias") or DEFAULT_MODEL_ALIAS).strip(),
         "model_source": str(job_input.get("model_source") or job_input.get("model_repo_id") or ""),
@@ -622,7 +702,9 @@ def normalize_input(job_input: dict) -> dict:
     }
     if params["diagnostics_only"]:
         return params
-    if not params["prompt"]:
+    if params["mode"] not in {"generate", "regional_inpaint"}:
+        raise RuntimeError("mode must be generate or regional_inpaint.")
+    if params["mode"] == "generate" and not params["prompt"]:
         raise RuntimeError("prompt is required.")
     if params["sampler"] not in SAMPLERS:
         raise RuntimeError(f"Unsupported sampler: {params['sampler']}")
@@ -636,6 +718,9 @@ def normalize_input(job_input: dict) -> dict:
         raise RuntimeError("batch_size must be 1..2.")
     if params["use_lora_2"] and not params["use_lora"]:
         raise RuntimeError("use_lora must be true when use_lora_2=true.")
+    if params["mode"] == "regional_inpaint":
+        enabled = ({1} if params["use_lora"] else set()) | ({2} if params["use_lora_2"] else set())
+        params.update(regional_inpaint.normalize_request(job_input, enabled))
     return params
 
 
@@ -677,39 +762,26 @@ def handler(job: dict) -> dict:
         images = []
         seeds = []
         debug_runs = []
+        region_passes = []
         base_seed = int(params["seed"])
-        for index in range(params["num_images"]):
+        if params["mode"] == "regional_inpaint":
+            images, region_passes, debug_runs = render_regions(params, model_name, lora_specs)
+            seeds = [step["seed"] for step in region_passes]
+        for index in range(params["num_images"] if params["mode"] == "generate" else 0):
             params["seed"] = base_seed + index
             seeds.append(params["seed"])
             workflow = build_workflow(params, model_name=model_name, lora_specs=lora_specs)
-            client_id = str(uuid.uuid4())
-            ws = connect_websocket(client_id)
-            try:
-                prompt_id = queue_prompt(workflow, client_id)
-                fetched = wait_for_websocket_images(
-                    ws,
-                    prompt_id,
-                    params["width"],
-                    params["height"],
-                    params["seed"],
-                    params["timeout"],
-                )
-            finally:
-                ws.close()
-            if params["debug"] or not fetched:
-                history = requests.get(f"{COMFY_URL}/history/{prompt_id}", timeout=30).json().get(prompt_id, {})
-                debug_runs.append(
-                    {
-                        "seed": params["seed"],
-                        "prompt_id": prompt_id,
-                        "history": summarize_history(history),
-                    }
-                )
+            fetched, debug = execute_workflow(workflow, params)
+            if debug:
+                debug_runs.append(debug)
             images.extend(fetched)
 
         result = {
             "images": images,
             "meta": {
+                "worker_version": WORKER_VERSION,
+                "mode": params["mode"],
+                "region_passes": region_passes,
                 "seconds": round(time.time() - started, 3),
                 "seeds": seeds,
                 "sampler": params["sampler"],
@@ -732,4 +804,5 @@ def handler(job: dict) -> dict:
         return {"error": str(exc), "seconds": round(time.time() - started, 3)}
 
 
-runpod.serverless.start({"handler": handler})
+if __name__ == "__main__":
+    runpod.serverless.start({"handler": handler})
