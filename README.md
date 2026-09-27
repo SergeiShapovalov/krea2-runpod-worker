@@ -64,8 +64,8 @@ Global LoRA chaining does not assign identities to separate people. Use
   "use_lora_2": true,
   "lora_2_source": "<second-person-repo>",
   "inpaint_regions": [
-    {"lora_slot": 1, "prompt": "<first trigger>, adult portrait in scene lighting", "mask_base64": "<base64 grayscale PNG>", "denoise": 0.8},
-    {"lora_slot": 2, "prompt": "<second trigger>, adult portrait in scene lighting", "mask_base64": "<base64 grayscale PNG>", "denoise": 0.8}
+    {"lora_slot": 1, "prompt": "<first trigger>, adult portrait in scene lighting", "mask_base64": "<base64 grayscale PNG>", "denoise": 0.55},
+    {"lora_slot": 2, "prompt": "<second trigger>, adult portrait in scene lighting", "mask_base64": "<base64 grayscale PNG>", "denoise": 0.55}
   ]
 }
 ```
@@ -76,6 +76,11 @@ editable, black is protected. Masks may not overlap. Each enabled slot may be
 used once; one or two regions are supported. This mode requires batch/count 1.
 Source dimensions are inferred from the image. A separate prompt is required
 for each region; do not put both identity triggers in a region's prompt.
+
+Set `denoise` explicitly. The handler defaults to 0.8 when omitted; in the
+paired beach test this sometimes moved faces within their masks. The comparison
+runner uses 0.55 to preserve the source pose more closely, at the cost of retaining
+more of the source face. Inspect mask boundaries and likeness at full resolution.
 
 Passes run in array order, with seeds `seed`, `seed+1`. Every pass starts from
 the unpatched base model/CLIP and applies exactly its selected LoRA. The previous
