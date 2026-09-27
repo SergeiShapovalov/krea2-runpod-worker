@@ -31,6 +31,10 @@ When both are enabled, the worker chains them in order: base model/clip -> LoRA 
 
 ## Separate identities: regional inpainting (v0.1.14)
 
+The release workflow uses `Dockerfile.release`, layering the handler onto the
+digest-pinned v0.1.13 image so this change does not upgrade ComfyUI/CUDA/FP8
+dependencies. `Dockerfile` remains the full runtime rebuild recipe.
+
 Global LoRA chaining does not assign identities to separate people. Use
 `mode="regional_inpaint"` with an existing image and non-overlapping face masks:
 

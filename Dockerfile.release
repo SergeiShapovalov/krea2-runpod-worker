@@ -1,0 +1,5 @@
+# Preserve the exact GPU/ComfyUI runtime already verified on both live endpoints.
+FROM ghcr.io/sergeishapovalov/krea2-runpod-worker@sha256:e33e9bcb37e05318c720eddaf06f5b03ff25e94b2d42692411b992ab53bbb249
+
+COPY handler.py /handler.py
+COPY regional_inpaint.py /regional_inpaint.py
