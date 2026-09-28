@@ -3,3 +3,5 @@ FROM ghcr.io/sergeishapovalov/krea2-runpod-worker@sha256:e33e9bcb37e05318c720edd
 
 COPY handler.py /handler.py
 COPY regional_inpaint.py /regional_inpaint.py
+COPY regional_generate.py /regional_generate.py
+COPY custom_nodes/krea2_regional_api /comfyui/custom_nodes/krea2_regional_api

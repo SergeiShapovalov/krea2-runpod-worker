@@ -20,16 +20,17 @@ import requests
 import runpod
 import websocket
 from huggingface_hub import hf_hub_download
-from PIL import Image
+from PIL import Image, ImageOps
 
 import regional_inpaint
+import regional_generate
 
 
 COMFY_URL = "http://127.0.0.1:8188"
 COMFY_WS_URL = "ws://127.0.0.1:8188/ws"
 COMFY_MODELS = Path("/comfyui/models")
 COMFY_INPUT_DIR = Path("/comfyui/input")
-WORKER_VERSION = "0.1.14"
+WORKER_VERSION = "0.1.15"
 DIFFUSION_DIR = COMFY_MODELS / "diffusion_models"
 LORA_DIR = COMFY_MODELS / "loras"
 
@@ -598,13 +599,45 @@ def render_regions(params: dict, model_name: str, lora_specs: list[dict]):
             debug_runs.append(debug)
     return [encode_image(current, f"krea2_regional_seed{params['seed']}.png")], passes, debug_runs
 
+def render_regional_scene(params: dict, model_name: str, lora_specs: list[dict]):
+    COMFY_INPUT_DIR.mkdir(parents=True, exist_ok=True)
+    metadata = []
+    with tempfile.TemporaryDirectory(prefix="krea2_regions_", dir=COMFY_INPUT_DIR) as temporary:
+        directory = Path(temporary)
+        mask_names = []
+        for index, region in enumerate(params["regions"]):
+            mask = region["mask"]
+            dw, dh = round_up(mask.width, 16) - mask.width, round_up(mask.height, 16) - mask.height
+            padded = ImageOps.expand(mask, (dw // 2, dh // 2, dw - dw // 2, dh - dh // 2))
+            filename = f"region-{index}.png"
+            padded.convert("RGB").save(directory / filename)
+            mask_names.append(f"{directory.name}/{filename}")
+            metadata.append({"lora_slot": region["lora_slot"], "prompt": region["prompt"],
+                             "mask_bbox": list(mask.getbbox())})
+        workflow = regional_generate.build_workflow(
+            build_workflow(params, model_name=model_name, lora_specs=[]),
+            params, lora_specs, mask_names)
+        images, debug = execute_workflow(workflow, params)
+    if len(images) != 1:
+        raise RuntimeError("Regional full-scene generation must return exactly one image.")
+    return images, {"regions": metadata, "options": params["regional_options"],
+                    "upstream_revision": regional_generate.UPSTREAM_REVISION,
+                    "clip_lora_applied": False, "source_image": False}, debug
+
+
 def runtime_diagnostics() -> dict:
     diagnostics = {
         "worker_version": WORKER_VERSION,
-        "modes": ["generate", "regional_inpaint"],
+        "modes": ["generate", "regional_inpaint", "regional_generate"],
         "python": sys.version,
         "executable": sys.executable,
     }
+
+    try:
+        info = requests.get(f"{COMFY_URL}/object_info", timeout=20).json()
+        diagnostics["regional_nodes"] = {name: name in info for name in regional_generate.NODE_TYPES}
+    except Exception as exc:
+        diagnostics["regional_nodes_error"] = type(exc).__name__
 
     try:
         import torch
@@ -702,9 +735,9 @@ def normalize_input(job_input: dict) -> dict:
     }
     if params["diagnostics_only"]:
         return params
-    if params["mode"] not in {"generate", "regional_inpaint"}:
-        raise RuntimeError("mode must be generate or regional_inpaint.")
-    if params["mode"] == "generate" and not params["prompt"]:
+    if params["mode"] not in {"generate", "regional_inpaint", "regional_generate"}:
+        raise RuntimeError("mode must be generate, regional_inpaint or regional_generate.")
+    if params["mode"] in {"generate", "regional_generate"} and not params["prompt"]:
         raise RuntimeError("prompt is required.")
     if params["sampler"] not in SAMPLERS:
         raise RuntimeError(f"Unsupported sampler: {params['sampler']}")
@@ -721,6 +754,9 @@ def normalize_input(job_input: dict) -> dict:
     if params["mode"] == "regional_inpaint":
         enabled = ({1} if params["use_lora"] else set()) | ({2} if params["use_lora_2"] else set())
         params.update(regional_inpaint.normalize_request(job_input, enabled))
+    if params["mode"] == "regional_generate":
+        enabled = ({1} if params["use_lora"] else set()) | ({2} if params["use_lora_2"] else set())
+        params.update(regional_generate.normalize_request(job_input, params, enabled))
     return params
 
 
@@ -763,10 +799,16 @@ def handler(job: dict) -> dict:
         seeds = []
         debug_runs = []
         region_passes = []
+        regional_scene = None
         base_seed = int(params["seed"])
         if params["mode"] == "regional_inpaint":
             images, region_passes, debug_runs = render_regions(params, model_name, lora_specs)
             seeds = [step["seed"] for step in region_passes]
+        elif params["mode"] == "regional_generate":
+            images, regional_scene, debug = render_regional_scene(params, model_name, lora_specs)
+            seeds = [base_seed]
+            if debug:
+                debug_runs.append(debug)
         for index in range(params["num_images"] if params["mode"] == "generate" else 0):
             params["seed"] = base_seed + index
             seeds.append(params["seed"])
@@ -782,6 +824,7 @@ def handler(job: dict) -> dict:
                 "worker_version": WORKER_VERSION,
                 "mode": params["mode"],
                 "region_passes": region_passes,
+                "regional_scene": regional_scene,
                 "seconds": round(time.time() - started, 3),
                 "seeds": seeds,
                 "sampler": params["sampler"],

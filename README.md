@@ -27,7 +27,50 @@ LoRA inputs are applied through ComfyUI `LoraLoader` nodes:
 - `use_lora`, `lora_source`, `lora_filename`, `lora_strength_model`, `lora_strength_clip`.
 - Optional second LoRA: `use_lora_2`, `lora_2_source`, `lora_2_filename`, `lora_2_strength_model`, `lora_2_strength_clip`.
 
-When both are enabled, the worker chains them in order: base model/clip -> LoRA 1 -> LoRA 2.
+In ordinary `generate` mode, the worker chains them in order: base model/clip -> LoRA 1 -> LoRA 2.
+
+## Full-character regional generation (v0.1.15)
+
+`mode="regional_generate"` generates the whole scene from noise in one sampling
+pass. Each character gets a spatial mask, separate text conditioning and its
+own transformer LoRA. There is no LoRA-free base image or face compositing.
+This is a composition/identity control, not a guarantee of correct anatomy.
+
+```json
+{
+  "mode": "regional_generate",
+  "prompt": "Two adult friends in opaque swimsuits, sitting together on a beach bench",
+  "width": 1080, "height": 1920,
+  "use_lora": true, "lora_source": "<first-person-repo>",
+  "use_lora_2": true, "lora_2_source": "<second-person-repo>",
+  "regions": [
+    {"lora_slot": 1, "prompt": "<first trigger>, adult woman in teal swimsuit, left", "box": [0.05, 0.05, 0.55, 0.95]},
+    {"lora_slot": 2, "prompt": "<second trigger>, adult woman in coral swimsuit, right", "box": [0.45, 0.05, 0.95, 0.95]}
+  ],
+  "regional_options": {"adaptive_masks": "off", "restrict_img_attn": false}
+}
+```
+
+Supply each region's normalized `[left, top, right, bottom]` box OR
+`mask_base64` matching requested dimensions. Masks cover entire characters,
+not only faces. Every enabled LoRA needs exactly one region. Overlaps are
+exclusive: strongest mask wins, earlier region wins equal-strength ties.
+Foreground characters should therefore come first. The base prompt describes
+the shared scene without identity triggers; each region uses only its own trigger.
+
+Initially supported: one image, batch 1, CFG 1, denoise 1, zero negative.
+Model strength applies; CLIP LoRA strengths do NOT apply in this mode (the
+separate text encoder stays clean). Nonspatial timestep LoRA layers are skipped
+to avoid global identity leakage. Unknown or zero matched layers fail closed.
+Optional `adaptive_masks`: `off`, `refine boxes`, `free (ignore boxes)`;
+optional `restrict_end_percent`: 0.05..1, used with image attention restriction.
+
+The MIT-licensed core is vendored from
+[ComfyUI-Krea2-Regional](https://github.com/januspluto/ComfyUI-Krea2-Regional)
+at `307081f2b954d9f5e683dadafdb53ca971ebdbfd`. Only its three core nodes are
+loaded; UI/routes/captioning are excluded. Local changes add the pinned ComfyUI
+runtime's diffusers-to-native key mapping and reject silently unmatched LoRAs.
+The existing digest-pinned runtime and old generation/inpainting modes remain.
 
 ## Separate identities: regional inpainting (v0.1.14)
 

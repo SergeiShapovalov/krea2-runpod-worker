@@ -23,6 +23,8 @@ RUN cd /comfyui \
 COPY prepare_models.py /prepare_models.py
 COPY handler.py /handler.py
 COPY regional_inpaint.py /regional_inpaint.py
+COPY regional_generate.py /regional_generate.py
+COPY custom_nodes/krea2_regional_api /comfyui/custom_nodes/krea2_regional_api
 COPY krea_start.sh /krea_start.sh
 
 RUN chmod +x /krea_start.sh

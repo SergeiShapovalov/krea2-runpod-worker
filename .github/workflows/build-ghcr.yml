@@ -20,7 +20,7 @@ jobs:
       - name: Test regional isolation
         run: |
           python -m pip install pytest Pillow requests websocket-client huggingface-hub runpod
-          python -m pytest -q test_regional_inpaint.py
+          python -m pytest -q test_regional_inpaint.py test_regional_generate.py
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -38,7 +38,7 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/krea2-runpod-worker
           tags: |
-            type=raw,value=v0.1.14
+            type=raw,value=v0.1.15
             type=sha,prefix=sha-
 
       - name: Build and push
